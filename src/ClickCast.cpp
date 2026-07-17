@@ -12,12 +12,24 @@
 // both run on the game's main thread, so the latch state below is only ever touched
 // from one thread — no synchronisation is required.
 //
-// How dual casting actually reaches this code, as established by in-game diagnostic logs:
-// the engine never emits a single "Dual Attack" button event on keyboard/mouse — a dual
-// always arrives as two separate Left and Right events. During the dual the engine drives
-// ONLY ONE caster (in practice the LEFT) to kReady while the partner caster stays kNone.
-// See the "driving-pair mode" block below for how that is handled. The single-event path is
-// still implemented for completeness, but never fires in practice.
+// DUAL resolution (context-03). In-game logs settled it: H1 is FALSE (no "Dual Attack"
+// event is ever emitted) and H2 is TRUE (a dual arrives as separate Left+Right events).
+// During the dual the engine drives ONLY ONE caster (empirically the LEFT) to kReady while
+// the partner caster stays kNone. See the "driving-pair mode" block below for the fix; the
+// H1 DualEvent path is retained but never fires in practice.
+//
+// DUAL diagnostics (context-03). The logging below is written so the dual-cast
+// hypotheses H1-H4 can be settled from Kasper's log alone:
+//   H1 — does ProcessButton see ONE "Dual Attack" ButtonEvent? Every [event] line logs
+//        the classified control (LeftAttack / RightAttack / DualAttack) with the handler's
+//        own heldLeft/heldRight/attackType. A DualAttack line => H1; only Left+Right lines
+//        => H2.
+//   H2 — or two separate Left+Right events with dual decided elsewhere? The two-event
+//        pair marker ([dual] ... two-event) fires when both hands latch independently.
+//   H3 — does equip/perk drive the dual path? [gate] logs both hands' equip; [dualcast]
+//        logs GetIsDualCasting() per hand (change-only) through the charge.
+//   H4 — does the release arrive as a dual event or as Left+Right? Every synthetic
+//        [release] and every swallowed physical up/down is logged with its control.
 // ============================================================================
 
 namespace
@@ -56,12 +68,12 @@ namespace
     // (accumulated frame delta, never wall-clock — same discipline as the Releasing safety).
     constexpr float kChargeStartGraceSecs = 1.0f;
 
-    // Hold-to-recast pacing. After a firing completes (Releasing->Idle) with
+    // Hold-to-recast pacing (context-04 step 2). After a firing completes (Releasing->Idle) with
     // the button still held, wait this long before starting the next latch — a short breather so
     // holding does not spam casts. Accumulated via the Update hook's a_delta (never wall-clock).
     constexpr float kRecastDelaySecs = 0.25f;
 
-    // Pair stall guard. If the driving-pair driver sticks in its first charging state
+    // Pair stall guard (FUND A). If the driving-pair driver sticks in its first charging state
     // (kUnk(1)) without progressing for this long, the engine has wedged: vanilla holds a down
     // that will never release. Abort the pair, clean up, and go Idle. a_delta-accumulated.
     constexpr float kPairStallSecs = 2.0f;
@@ -91,14 +103,13 @@ namespace
     HandLatch g_hand[kHandCount];
 
     // ---- dual-pair coordination -------------------------------------------
-    // Two ways a dual could arise:
-    //   * DualEvent: ONE physical "Dual Attack" button-down latches BOTH hands, then waits
-    //     until BOTH casters are kReady and delivers a single synthetic "Dual Attack"
-    //     release. The engine never emits such an event on keyboard/mouse, so this path is
-    //     implemented but does not fire in practice.
-    //   * TwoEvent: independent Left + Right latches happen to be active at the same time.
-    //     Each hand keeps its own single-hand release; the two virtual holds ARE the
-    //     symmetric dual. The pair is only a marker.
+    // Two ways a dual can arise, which this build's logging is designed to tell apart:
+    //   * DualEvent (H1): ONE physical "Dual Attack" button-down latched BOTH hands. New
+    //     coordinated behaviour — wait until BOTH casters are kReady, then deliver a single
+    //     synthetic "Dual Attack" release.
+    //   * TwoEvent (H2): independent Left + Right latches happened to be active at the same
+    //     time. No new behaviour — each hand keeps its own single-hand release; the two
+    //     virtual holds ARE the symmetric dual. The pair is only a log marker.
     enum class PairKind
     {
         None,
@@ -127,12 +138,12 @@ namespace
         g_pair.data = nullptr;
     }
 
-    // ---- driving-pair mode -------------------------------------------------
-    // In-game diagnostics established that a dual cast arrives as separate Left+Right events,
-    // and that during the dual the engine drives ONLY ONE caster (in practice the LEFT) to
-    // kReady while the PARTNER caster sits at kNone the whole time. A naive per-hand poll
-    // reads that expected partner-kNone as "charge interrupted" and resets the partner latch,
-    // after which the partner's physical button-up reaches vanilla and cancels the dual charge.
+    // ---- driving-pair mode (context-03 dual-fix) --------------------------
+    // In-game diagnostics proved H2: a dual cast arrives as separate Left+Right events, and
+    // during the dual the engine drives ONLY ONE caster (empirically the LEFT) to kReady while
+    // the PARTNER caster sits at kNone the whole time. The old per-hand poll read that expected
+    // partner-kNone as "charge interrupted" and reset the partner latch, so the partner's
+    // physical button-up then reached vanilla and cancelled the dual charge.
     //
     // Fix: once a pair is active we STOP polling per hand. We poll only the driving caster,
     // treat the partner's kNone as expected (never reset on it), and when the driver reaches
@@ -297,7 +308,7 @@ namespace
         }
     }
 
-    // Two-handed shared-form signature: the PARTNER hand has the SAME equipped form as
+    // Two-handed shared-form signature (FUND A): the PARTNER hand has the SAME equipped form as
     // a_hand's latch AND its caster is actively casting (state != kNone). In that config the
     // engine runs ONE cast on the partner caster, so a release on a_hand's control would cancel
     // that running cast. Used both to trigger partner-driver adoption and to guard cleanup.
@@ -382,10 +393,9 @@ namespace
             return form;
         }
 
-        // ---- Staff: Weapon + IsStaff + FaF enchantment + chargeTime>0. In-game testing on a
-        // heavily modded setup showed a FaF staff drives the hand caster through the SAME
-        // kUnk->kReady sequence as a spell, so the machine is reused 1:1 with the staff weapon
-        // as L.spell.
+        // ---- Staff (context-04 M1b step 5): Weapon + IsStaff + FaF enchantment + chargeTime>0.
+        // Empirically (LoreRim) a FaF staff drives the hand caster through the SAME kUnk->kReady
+        // sequence as a spell, so the machine is reused 1:1 with the staff weapon as L.spell.
         if (ft == RE::FormType::Weapon) {
             auto* weap = static_cast<RE::TESObjectWEAP*>(form);
             if (!weap->IsStaff()) {
@@ -468,7 +478,7 @@ namespace
     // ---- cleanup release ---------------------------------------------------
     // A latch/pair is ending WITHOUT a synthetic release having been delivered (kNone-interrupt
     // before kReady, grace timeout, equip-change, stall). Vanilla received a down for this hand
-    // and, if the button is now physically UP, is left holding it forever (a hanging hold).
+    // and, if the button is now physically UP, is left holding it forever (FUND A: hanging hold).
     // Deliver ONE synthetic release to balance it. The cast is already dead, so cancellation is
     // the intended outcome — the "no release before kReady" rule only guards ACTIVE casts. Never
     // clean up while the button is still physically held: vanilla's hold is then legitimate and
@@ -642,7 +652,7 @@ namespace
     }
 
     // One hand of a DualEvent pair dropped out (kNone / equip change / lost caster). Resolve
-    // the partner so no "dead hand" is left latched: if it already reached kReady,
+    // the partner so no "dead hand" is left latched (STEP 3.4): if it already reached kReady,
     // release it as a single hand; otherwise let it continue as a plain single-hand latch that
     // self-releases at its own kReady. Either way the dual pair is dissolved.
     void HandleDualPairBreak(std::size_t a_fallenHand, RE::PlayerCharacter* a_pc)
@@ -675,8 +685,8 @@ namespace
     {
         // A Latched hand has NOT had its release delivered yet (that happens only at kReady ->
         // Releasing). If its button is physically up, balance vanilla's hold (cleanup release).
-        // But NOT when the partner runs the same-form cast — a release on this control would
-        // cancel that running cast. Suppress and log.
+        // FIX 2 (M1b step 2): but NOT when the partner runs the same-form cast — a release on
+        // this control would cancel that running cast (FUND A). Suppress and log.
         if (g_hand[a_hand].phase == Phase::Latched) {
             if (PartnerActiveSameForm(a_hand, a_pc)) {
                 spdlog::info("[cc] cleanup {} suppressed (partner casting same form) ({})",
@@ -737,7 +747,7 @@ namespace
             L.chargeStarted = true;
         }
 
-        // Partner-driver adoption: a two-handed scroll runs its cast on ONLY
+        // Partner-driver adoption (M1b step 2, FUND A): a two-handed scroll runs its cast on ONLY
         // ONE caster. If, while Latched in grace, this hand's own caster stays kNone but the
         // PARTNER holds the same form with an active caster, adopt the partner as this latch's
         // driver — poll it and release THIS hand at the partner's kReady. Generic mechanism; only
@@ -788,7 +798,7 @@ namespace
         // ---- phase == Latched ----
 
         // Safety reset (no synthetic release) — charge ended / was interrupted. For a dual
-        // pair this is the asymmetric-fall case: resolve the partner.
+        // pair this is the asymmetric-fall case (STEP 3.4): resolve the partner.
         if (driveState == RE::MagicCaster::State::kNone) {
             if (!L.chargeStarted) {
                 // Charge hasn't started yet (engine's dual-decision window). Hold the latch and
@@ -806,11 +816,11 @@ namespace
             return;
         }
 
-        // kReady is treated as charge-complete -> fire, then hold in Releasing so the
+        // H3: kReady is treated as charge-complete -> fire, then hold in Releasing so the
         // post-release firing window cannot be cancelled by a stray click.
         if (driveState == RE::MagicCaster::State::kReady) {
             if (L.dualEventHand) {
-                // DualEvent coordination: only release once BOTH casters are ready.
+                // DualEvent coordination (STEP 3.3): only release once BOTH casters are ready.
                 const std::size_t other  = (a_hand == kLeft) ? kRight : kLeft;
                 auto&             O       = g_hand[other];
                 auto*             oCaster = GetCaster(pc, other);
@@ -929,7 +939,7 @@ namespace
         if (g_drive.active || !a_pc) {
             return;
         }
-        // The single-event DualEvent path coordinates itself — leave those hands to it.
+        // The H1 DualEvent path coordinates itself — leave those hands to it.
         if (g_hand[kLeft].dualEventHand || g_hand[kRight].dualEventHand) {
             return;
         }
@@ -957,6 +967,20 @@ namespace
         // each hand must fire at its OWN kReady — that is handled by per-hand PollOnce, not here.
         // Releasing both at the driver's kReady would cancel the partner's still-charging cast.
         if (!lDual && !rDual) {
+            return;
+        }
+
+        // FIX (context-06 M2): GetIsDualCasting() is NECESSARY but NOT SUFFICIENT. A real engine
+        // dual ALWAYS has BOTH physical attack buttons down. A stale kDualCasting flag (left set by
+        // an earlier completed dual and not yet cleared by the engine) could otherwise form a FALSE
+        // pair on a single click: driver = the OTHER hand, whose caster never charges -> grace
+        // timeout -> the click is swallowed with no cast. Require both physical buttons down; if
+        // not, veto the pair and let the latched hand continue as a normal single latch (PollOnce).
+        // Partner-driver adoption (two-handed scrolls) runs via PollOnce/PartnerActiveSameForm with
+        // GetIsDualCasting()==false, so it never reaches here and is unaffected.
+        if (!(g_phys[kLeft].down && g_phys[kRight].down)) {
+            spdlog::info("[cc] pair veto (dual flag L={} R={}, btn L={} R={}) -> single latch",
+                lDual ? 1 : 0, rDual ? 1 : 0, g_phys[kLeft].down ? 1 : 0, g_phys[kRight].down ? 1 : 0);
             return;
         }
 
@@ -996,8 +1020,9 @@ namespace
         g_drive.pairElapsed = 0.0f;
 
         RE::TESForm* dForm = g_hand[driver].spell;
-        spdlog::info("[cc] pair L+R {}='{}' (engine dual, driver={})",
-            KindName(dForm), dForm ? dForm->GetName() : "?", HandName(driver));
+        spdlog::info("[cc] pair L+R {}='{}' (engine dual, driver={}, btn L={} R={}, dual L={} R={})",
+            KindName(dForm), dForm ? dForm->GetName() : "?", HandName(driver),
+            g_phys[kLeft].down ? 1 : 0, g_phys[kRight].down ? 1 : 0, lDual ? 1 : 0, rDual ? 1 : 0);
     }
 
     // Poll a driving pair: ONLY the driving caster decides state; the partner's kNone is
@@ -1040,7 +1065,7 @@ namespace
             g_drive.chargeStarted = true;
         }
 
-        // Stall guard: while Driving, the driver must progress past its FIRST charging
+        // Stall guard (FUND A): while Driving, the driver must progress past its FIRST charging
         // state (kUnk(1)). If it sticks there for kPairStallSecs it has wedged (never reaches
         // kUnk(2)) — abort the pair with cleanup and no recast. A normal charge leaves kUnk(1)
         // within ~14 ms, so the later dwell in kUnk(2) never counts here.
@@ -1196,7 +1221,7 @@ namespace
         g_originalUpdate(a_this, a_delta);  // always chain the original update
     }
 
-    // ---- dual-attack control (single-event path) ---------------------------
+    // ---- dual-attack control (H1) ------------------------------------------
     // Latch one hand as part of a "Dual Attack" pair. Stores the hand's OWN Left/Right
     // control string (for a possible single-hand fallback release on asymmetric fall); the
     // coordinated dual release uses the "Dual Attack" payload held in g_pair.
@@ -1252,10 +1277,11 @@ namespace
                 spdlog::info("[cc] pair L+R L='{}' R='{}' (dual-attack event)",
                     ls->GetName(), rs->GetName());
 
-                // Pass the dual-DOWN to vanilla so it begins charging BOTH casters: swallowing
-                // it entirely would leave vanilla with nothing to charge. This mirrors the
-                // single-hand latch, which also passes its own down through — charge on down,
-                // swallow only the dual-UP virtual hold. The payload is captured above.
+                // Pass the dual-DOWN to vanilla so it begins charging BOTH casters. (STEP 3.1
+                // calls this the "swallowed down"; swallowing it entirely would leave vanilla
+                // with nothing to charge, exactly as the approved single-hand latch passes its
+                // own down through. Design decision confirmed with Kasper: mirror single-hand —
+                // charge on down, swallow only the dual-UP virtual hold. Payload captured above.)
                 CallOriginal(a_this, a_event, a_data);
                 return;
             }
@@ -1293,7 +1319,7 @@ namespace
             return;
         }
 
-        // Which attack control is this? Classify against Left / Right / Dual.
+        // Which attack control is this? Classify against Left / Right / Dual (H1 vs H2).
         auto* userEvents = RE::UserEvents::GetSingleton();
         const RE::BSFixedString& ue = a_event->QUserEvent();
 
@@ -1354,7 +1380,7 @@ namespace
             return;  // normal during a pending recast — the cancel/fire line reports the outcome
         }
 
-        // The "Dual Attack" control has its own handling.
+        // "Dual Attack" control (H1) has its own handling.
         if (isDualControl) {
             ProcessDualControl(a_this, a_event, a_data, ue, isDown, isUp);
             return;
@@ -1435,7 +1461,7 @@ namespace ClickCast
             return;
         }
 
-        // Hook AttackBlockHandler::ProcessButton (vtable slot 4). Use the concrete
+        // H4: hook AttackBlockHandler::ProcessButton (vtable slot 4). Use the concrete
         // VTABLE_AttackBlockHandler offset array — AttackBlockHandler has no own VTABLE
         // member and would otherwise resolve to the base HeldStateHandler vtable.
         REL::Relocation<std::uintptr_t> vtblAttack{ RE::VTABLE_AttackBlockHandler[0] };
