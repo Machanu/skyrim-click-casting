@@ -2,6 +2,7 @@
 #include <spdlog/sinks/basic_file_sink.h>
 
 #include "ClickCast.h"
+#include "Settings.h"
 
 // Resolve the SKSE log directory ourselves. CommonLibSSE-NG's SKSE::log::log_directory()
 // reads the "My Games" subfolder name from the runtime via RELOCATION_ID(508778, 380738),
@@ -51,6 +52,11 @@ namespace {
     // chosen as the safest "everything is initialised" point.)
     void MessageListener(SKSE::MessagingInterface::Message* a_msg) {
         if (a_msg && a_msg->type == SKSE::MessagingInterface::kDataLoaded) {
+            // Settings first: the gate and the tempo read them from the very first frame, and
+            // RE::UI's singleton exists by kDataLoaded so the reload sink can be armed here too
+            // (reload trigger (b): Journal Menu close, i.e. the MCM being closed).
+            Settings::Load();
+            Settings::RegisterMenuSink();
             ClickCast::Install();
         }
     }
@@ -60,7 +66,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse) {
     SKSE::Init(a_skse);
     SetupLog();
 
-    spdlog::info("Skyrim Click-Casting loaded");
+    spdlog::info("Auto-Shot Click-Casting loaded");
 
     const auto* messaging = SKSE::GetMessagingInterface();
     if (!messaging || !messaging->RegisterListener(MessageListener)) {

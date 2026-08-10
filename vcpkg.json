@@ -1,7 +1,8 @@
 {
-  "name": "skyrim-click-casting",
-  "version-string": "0.0.1",
+  "name": "auto-shot-click-casting",
+  "version-string": "2.0.0",
   "dependencies": [
-    "commonlibsse-ng"
+    "commonlibsse-ng",
+    "simpleini"
   ]
 }

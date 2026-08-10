@@ -31,12 +31,12 @@
 // line with their reason and state, gate rejections log once per equipped form per hand, and
 // error paths (null handler/event, hook failure) stay fully verbose at error level.
 //
-// Staves: fire-and-forget staves are click-cast too. In-game testing on a heavily modded setup
-// showed a FaF staff drives the hand caster through the same kUnk->kReady sequence as a spell,
-// so the gate accepts a Weapon that IsStaff() with a FaF enchantment (formEnchanting) and
-// chargeTime > 0, and the whole machine (latch / poll / release / hold-to-recast / cleanup) is
-// reused 1:1 — the staff weapon is tracked as the equipped object. Concentration staves and
-// un-enchanted / other weapons are rejected by the gate and pass through.
+// Staves: fire-and-forget staves ARE click-cast. Empirically a FaF staff drives the hand caster
+// through the same kUnk->kReady sequence as a spell, so the gate accepts a Weapon that IsStaff()
+// with a FaF enchantment (formEnchanting) and chargeTime > 0, and the whole machine (latch / poll /
+// release / hold-to-recast / cleanup) is reused 1:1 — the staff weapon is tracked as the equipped
+// object. Concentration staves and un-enchanted / other weapons still gate-FAIL and pass through.
+// [staff] marks staff latch-start / firing / Idle-exit.
 namespace ClickCast
 {
     void Install();
